@@ -1,0 +1,7 @@
+# persisted UI state — local to each machine, never commit
+.brownnoise_state.json
+.brownnoise_state.json.tmp
+
+# python
+__pycache__/
+*.pyc
