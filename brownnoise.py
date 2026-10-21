@@ -6,10 +6,12 @@ Controls
   ←/→        select a setting (its full name shows in the center panel)
   ↑/↓        increase / decrease the selected setting
   space      play / pause
+  ⏯          play / pause from the media key, even when unfocused (macOS)
   r          reset all settings to defaults
   q / esc    quit
 
-Requires `sox` (provides the `play` binary) on PATH.
+Requires `sox` (provides the `play` binary) on PATH. Media keys additionally
+need `swiftc` (Xcode Command Line Tools) to build the small helper once.
 """
 
 import curses
@@ -19,12 +21,17 @@ import random
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 # Persisted state lives next to this script so it survives restarts.
 # It's gitignored so it never gets committed.
-STATE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".brownnoise_state.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(HERE, ".brownnoise_state.json")
+
+# Media-key helper: Swift source is committed, the compiled binary is not.
+HELPER_SRC = os.path.join(HERE, "mediakeys.swift")
+HELPER_BIN = os.path.join(HERE, ".mediakeys")
 
 # ───────────────────────────── settings model ──────────────────────────────
 # Each setting carries a short abbreviation (shown in the top row), a full
@@ -297,6 +304,98 @@ class Thunder:
         self.proc = None
 
 
+# ─────────────────────────────── media keys ────────────────────────────────
+# macOS sends the ⏯ key to whichever app last claimed "Now Playing", never to
+# the terminal. mediakeys.swift claims it and prints each press on stdout.
+
+def build_helper():
+    """Compile the media-key helper if it's missing or older than its source.
+
+    Returns the binary path, or None when it can't be built (not macOS, no
+    swiftc, compile error). Media keys are a nicety, never a requirement.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        src_mtime = os.path.getmtime(HELPER_SRC)
+    except OSError:
+        return None
+    try:
+        if os.path.getmtime(HELPER_BIN) >= src_mtime:
+            return HELPER_BIN
+    except OSError:
+        pass
+    if shutil.which("swiftc") is None:
+        return None
+    print("building media-key helper (first run only)…", flush=True)
+    try:
+        subprocess.run(["swiftc", "-O", HELPER_SRC, "-o", HELPER_BIN],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=True, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return HELPER_BIN
+
+
+class MediaKeys:
+    """Runs the media-key helper and relays its presses to the main loop."""
+
+    def __init__(self, path):
+        self.proc = None
+        self.buf = b""
+        self.sent = None   # last playback state told to the helper
+        if path is None:
+            return
+        try:
+            self.proc = subprocess.Popen(
+                [path],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return
+        os.set_blocking(self.proc.stdout.fileno(), False)
+
+    def poll(self):
+        """Commands ("toggle" / "play" / "pause") pressed since the last call."""
+        if self.proc is None:
+            return []
+        try:
+            chunk = os.read(self.proc.stdout.fileno(), 4096)
+        except BlockingIOError:
+            return []
+        except OSError:
+            chunk = b""
+        if not chunk:          # helper exited; carry on without media keys
+            self.stop()
+            return []
+        self.buf += chunk
+        *lines, self.buf = self.buf.split(b"\n")
+        return [ln.decode(errors="replace").strip() for ln in lines]
+
+    def sync(self, playing):
+        """Keep Control Center's play/pause state in step with ours."""
+        if self.proc is None or playing == self.sent:
+            return
+        try:
+            self.proc.stdin.write(b"playing\n" if playing else b"paused\n")
+            self.proc.stdin.flush()
+            self.sent = playing
+        except OSError:
+            self.stop()
+
+    def stop(self):
+        if self.proc is None:
+            return
+        try:
+            self.proc.stdin.close()   # helper exits on EOF
+        except OSError:
+            pass
+        _kill(self.proc)
+        self.proc = None
+
+
 # ─────────────────────────────── theming ───────────────────────────────────
 # A brown / amber / tan palette when the terminal supports 256 colors,
 # with a graceful fallback to the basic 8.
@@ -518,7 +617,7 @@ def draw(win, settings, sel, player, t):
 
 # ──────────────────────────────── main loop ────────────────────────────────
 
-def run(stdscr):
+def run(stdscr, helper):
     curses.curs_set(0)
     curses.cbreak()
     stdscr.keypad(True)
@@ -530,12 +629,21 @@ def run(stdscr):
     player = Player()
     player.start(settings)
     thunder = Thunder()
+    media = MediaKeys(helper)
 
     dirty = False
     last_change = 0.0
     start = time.monotonic()
 
     while True:
+        # media keys (⏯, headphone buttons) arrive here even when unfocused
+        for cmd in media.poll():
+            if (cmd == "toggle"
+                    or (cmd == "play" and not player.playing)
+                    or (cmd == "pause" and player.playing)):
+                player.toggle(settings)
+        media.sync(player.playing)
+
         now = time.monotonic()
         draw(stdscr, settings, sel, player, now - start)
 
@@ -577,6 +685,7 @@ def run(stdscr):
             dirty = True; last_change = time.monotonic()
 
     save_state(settings)
+    media.stop()
     thunder.stop()
     player.stop()
 
@@ -585,8 +694,9 @@ def main():
     if shutil.which("play") is None:
         raise SystemExit(
             "error: `play` not found. Install SoX first:  brew install sox")
+    helper = build_helper()
     try:
-        curses.wrapper(run)
+        curses.wrapper(run, helper)
     except KeyboardInterrupt:
         pass
 

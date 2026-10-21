@@ -29,10 +29,26 @@ ln -s "$PWD/brn" /opt/homebrew/bin/brn   # then just run: brn
 | `←` / `→`      | Select a setting (its full name shows in the center)    |
 | `↑` / `↓`      | Increase / decrease the selected setting                |
 | `space`        | Play / pause                                            |
+| `⏯` media key  | Play / pause, even when the terminal isn't focused      |
 | `r`            | Reset everything to defaults                            |
 | `q` / `esc`    | Quit                                                    |
 
 `hjkl` work as vim-style aliases for the arrows.
+
+## Media keys
+
+On macOS, the keyboard's play/pause key (and AirPods / headphone buttons)
+toggle playback just like they do for Spotify. macOS sends that key to
+whichever app last claimed **Now Playing**, never to a terminal, so a tiny
+Swift helper (`mediakeys.swift`) claims it and relays each press back over a
+pipe. Brown Noise also shows up in Control Center's Now Playing widget.
+
+The helper is compiled once with `swiftc` on first launch (needs the Xcode
+Command Line Tools: `xcode-select --install`) and cached as `.mediakeys`.
+If it can't be built, everything else works as before.
+
+Like any media app, the most recent one to start playing owns the key: launch
+`brn` and it's yours; hit play in Spotify and the key goes back to Spotify.
 
 ## Settings
 

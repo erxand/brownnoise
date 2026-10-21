@@ -2,6 +2,9 @@
 .brownnoise_state.json
 .brownnoise_state.json.tmp
 
+# compiled media-key helper (built from mediakeys.swift on first run)
+.mediakeys
+
 # python
 __pycache__/
 *.pyc
